@@ -1,5 +1,7 @@
 # qBittorrent Auto Updater
 
+**English** | [Русский](README.ru.md)
+
 A tiny tool that keeps qBittorrent up to date by itself and removes the
 *"A new version is available — do you want to update?"* prompt, so you never see it again.
 
@@ -71,6 +73,11 @@ because qBittorrent overwrites its settings file when it exits.
 **Requirements:** macOS with qBittorrent installed in `/Applications` and started at least
 once. The tool needs `python3` or `jq` (one of them is usually already present) to verify
 checksums.
+
+> **Note:** since qBittorrent 5.3.0 the official GitHub releases no longer include the
+> macOS installer (`.dmg`). The tool does nothing dangerous about it: it detects that no
+> installer was published, reports it (exit code `10`) and installs nothing. Auto-updating
+> on macOS works again as soon as official `.dmg` files return to the releases.
 
 ### Command 1 — set up auto-updating (recommended)
 
@@ -174,6 +181,7 @@ Open it and check the last lines. The outcome of each run is also stored in an e
 | `7` | Download or installation failed |
 | `8` | Installer finished but the result is unexpected |
 | `9` | Checksum could not be verified, update refused |
+| `10` | This release has no installer for your platform (macOS since 5.3.0) |
 
 If qBittorrent is set to "minimize to tray", it may not close on the first try; the tool
 then closes it forcefully — your torrents resume from where they were afterwards.

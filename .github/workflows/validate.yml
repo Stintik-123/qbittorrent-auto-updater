@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  parse:
-    name: Parse scripts
+  powershell:
+    name: Check PowerShell scripts
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,3 +27,39 @@ jobs:
             }
             Write-Host "OK: $($file.Name)"
           }
+
+  bash:
+    name: Check bash script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check bash syntax
+        run: bash -n qbt-updater.sh
+      - name: Run ShellCheck
+        run: |
+          shellcheck -S error qbt-updater.sh
+          echo 'OK: qbt-updater.sh'
+      - name: Test version comparison
+        run: |
+          QBT_SKIP_MAIN=1 source qbt-updater.sh
+          expect_lt() {
+            if ! version_lt "$1" "$2"; then
+              echo "FAIL: expected $1 to be older than $2" >&2
+              exit 1
+            fi
+          }
+          expect_not_lt() {
+            if version_lt "$1" "$2"; then
+              echo "FAIL: expected $1 NOT to be older than $2" >&2
+              exit 1
+            fi
+          }
+          expect_lt 5.2.3 5.3.1
+          expect_not_lt 5.3.1 5.3.1
+          expect_not_lt 5.3.1 5.2.3
+          expect_lt 5.3.0beta1 5.3.0beta2
+          expect_lt 5.3.0beta2 5.3.0rc1
+          expect_lt 5.3.0rc1 5.3.0
+          expect_not_lt 5.3.0 5.3.0beta1
+          expect_lt 5.3.0beta1 5.3.0
+          echo 'All version tests passed'

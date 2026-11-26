@@ -67,7 +67,9 @@ detect_install() {
             "$HOME/Applications/qbittorrent"*.AppImage \
             "$HOME/.local/bin/qbittorrent"*.AppImage \
             "$HOME/bin/qbittorrent"*.AppImage \
-            /opt/qbittorrent*.AppImage; do
+            "/opt/qbittorrent"*.AppImage \
+            "$HOME/Desktop/qbittorrent"*.AppImage \
+            "$HOME/Downloads/qbittorrent"*.AppImage; do
             if [[ -f "$candidate" ]]; then
                 INSTALL_PATH="$candidate"
                 break
@@ -158,16 +160,22 @@ pre_rank() {
     esac
 }
 
+pre_num() {
+    if [[ "$1" =~ ([0-9]+)$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+    else
+        echo 0
+    fi
+}
+
 version_lt() {
     local a_core b_core
     a_core="${1%%[a-zA-Z]*}"
     b_core="${2%%[a-zA-Z]*}"
     if [[ "$a_core" != "$b_core" ]]; then
         local -a A B
-        local old_ifs="$IFS"
         IFS=. read -r -a A <<< "$a_core"
         IFS=. read -r -a B <<< "$b_core"
-        IFS="$old_ifs"
         local i x y
         for i in 0 1 2 3; do
             x="${A[i]:-0}"
@@ -177,10 +185,14 @@ version_lt() {
         done
         return 1
     fi
-    local ar br
+    local ar br an bn
     ar="$(pre_rank "$1")"
     br="$(pre_rank "$2")"
-    (( ar < br )) && return 0
+    if (( ar < br )); then return 0; fi
+    if (( ar > br )); then return 1; fi
+    an="$(pre_num "$1")"
+    bn="$(pre_num "$2")"
+    if (( an < bn )); then return 0; fi
     return 1
 }
 
@@ -188,11 +200,7 @@ choose_asset() {
     local prefix="qbittorrent-${LATEST_VERSION}"
     local -a names
     if [[ "$PLATFORM" == "macos" ]]; then
-        if [[ "$VARIANT" == "_lt12" ]]; then
-            names=("${prefix}_lt12.dmg")
-        else
-            names=("${prefix}.dmg" "${prefix}_lt20.dmg")
-        fi
+        names=("${prefix}.dmg" "${prefix}_lt20.dmg")
     else
         if [[ "$(uname -m)" != "x86_64" ]]; then
             log ERROR 'Official Linux AppImages are published for x86_64 only; update refused.'
@@ -216,6 +224,10 @@ choose_asset() {
         fi
     done
     if [[ -z "$ASSET_NAME" ]]; then
+        if [[ "$PLATFORM" == "macos" ]] && ! grep -q '\.dmg' "$DIGESTS_FILE"; then
+            log ERROR 'The official release does not include a macOS installer (.dmg); nothing can be installed.'
+            return 10
+        fi
         log ERROR 'No trusted SHA-256 digest for the installer; refusing to run an unverified file.'
         return 9
     fi
@@ -310,26 +322,51 @@ perform_update() {
     log INFO 'Checksum verified.'
     log INFO 'Installing...'
     if [[ "$PLATFORM" == "macos" ]]; then
-        local mnt="$tmp/mnt"
+        local mnt="$tmp/mnt" staged="$mnt/qBittorrent.app"
         mkdir -p "$mnt"
         if ! hdiutil attach "$file" -nobrowse -quiet -mountpoint "$mnt"; then
             log ERROR 'Cannot mount the downloaded disk image.'
             rm -rf "$tmp"
             return 7
         fi
-        if [[ ! -d "$mnt/qBittorrent.app" ]]; then
+        if [[ ! -d "$staged" ]]; then
             log ERROR 'The disk image does not contain qBittorrent.app.'
             hdiutil detach "$mnt" -quiet || true
             rm -rf "$tmp"
             return 7
         fi
-        rm -rf "$APP_DIR"
-        if ! ditto "$mnt/qBittorrent.app" "$APP_DIR"; then
-            log ERROR 'Cannot copy qBittorrent.app into /Applications.'
+        local newver
+        newver="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$staged/Contents/Info.plist" 2>/dev/null || true)"
+        if [[ "$newver" != "$LATEST_VERSION" ]]; then
+            log ERROR "The downloaded app reports version ${newver:-unknown} (expected $LATEST_VERSION)."
+            hdiutil detach "$mnt" -quiet || true
+            rm -rf "$tmp"
+            return 8
+        fi
+        local backup="$APP_DIR.backup-$$"
+        local had_old=0
+        if [[ -d "$APP_DIR" ]]; then
+            if ! mv "$APP_DIR" "$backup"; then
+                log ERROR 'Cannot move the current qBittorrent.app aside.'
+                hdiutil detach "$mnt" -quiet || true
+                rm -rf "$tmp"
+                return 7
+            fi
+            had_old=1
+        fi
+        if ! ditto "$staged" "$APP_DIR"; then
+            if [[ "$had_old" == "1" ]]; then
+                rm -rf "$APP_DIR"
+                mv "$backup" "$APP_DIR"
+                log ERROR 'Cannot install the new version; your previous qBittorrent.app was restored.'
+            else
+                log ERROR 'Cannot install the new version.'
+            fi
             hdiutil detach "$mnt" -quiet || true
             rm -rf "$tmp"
             return 7
         fi
+        rm -rf "$backup"
         xattr -dr com.apple.quarantine "$APP_DIR" 2>/dev/null || true
         hdiutil detach "$mnt" -quiet || true
     else
@@ -340,14 +377,6 @@ perform_update() {
         fi
     fi
     rm -rf "$tmp"
-    if [[ "$PLATFORM" == "macos" ]]; then
-        local after
-        after="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_DIR/Contents/Info.plist" 2>/dev/null || true)"
-        if [[ "$after" != "$LATEST_VERSION" ]]; then
-            log WARN "Installer finished but the version is ${after:-unknown} (expected $LATEST_VERSION)."
-            return 8
-        fi
-    fi
     mkdir -p "$INSTALL_DIR"
     echo "$LATEST_VERSION" > "$STATE_FILE" 2>/dev/null || true
     log INFO "Updated to $LATEST_VERSION."
@@ -387,7 +416,7 @@ EOF
 [Desktop Entry]
 Type=Application
 Name=qBittorrent Auto Updater
-Exec=$INSTALL_DIR/qbt-updater.sh update
+Exec="$INSTALL_DIR/qbt-updater.sh" update
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
@@ -396,34 +425,38 @@ EOF
 }
 
 cmd_install() {
-    if ! detect_install; then
-        exit $?
-    fi
+    detect_install
     install_task
-    local was_running="$RUNNING"
-    if [[ "$was_running" == "yes" ]] && ! stop_app; then
-        log WARN 'Setup finished, but qBittorrent could not be closed.'
-        return 0
-    fi
-    if disable_popup; then
-        log INFO 'Setup complete. The client is updated automatically every time you sign in.'
-    else
-        log WARN 'Setup finished, but the update popup could not be disabled.'
-    fi
+    local was_running="$RUNNING" stopped=1
     if [[ "$was_running" == "yes" ]]; then
-        start_app
+        if stop_app; then
+            stopped=0
+        fi
+    fi
+    if [[ "$stopped" == "0" ]]; then
+        if disable_popup; then
+            log INFO 'Setup complete. The client is updated automatically every time you sign in.'
+        else
+            log WARN 'Setup finished, but the update popup could not be disabled.'
+        fi
+        if [[ "$was_running" == "yes" ]]; then
+            start_app
+        fi
+    else
+        log WARN 'qBittorrent could not be closed; the update popup was left unchanged.'
+        EXIT_CODE=6
     fi
     return 0
 }
 
 cmd_hide_popup() {
-    if ! detect_install; then
-        exit $?
-    fi
+    detect_install
     local was_running="$RUNNING"
-    if [[ "$was_running" == "yes" ]] && ! stop_app; then
-        EXIT_CODE=6
-        return 0
+    if [[ "$was_running" == "yes" ]]; then
+        if ! stop_app; then
+            EXIT_CODE=6
+            return 0
+        fi
     fi
     if disable_popup; then
         log INFO 'Update popup disabled. Auto-update is not set up.'
@@ -437,21 +470,15 @@ cmd_hide_popup() {
 }
 
 cmd_update() {
-    if ! detect_install; then
-        exit $?
-    fi
-    if ! fetch_latest; then
-        exit $?
-    fi
+    detect_install
+    fetch_latest
     log INFO "Latest:    $LATEST_VERSION"
     if [[ -n "$INSTALL_VERSION" ]] && ! version_lt "$INSTALL_VERSION" "$LATEST_VERSION"; then
         log INFO "Already up to date ($INSTALL_VERSION)."
         exit 0
     fi
     log INFO "Installed: ${INSTALL_VERSION:-unknown} ($INSTALL_PATH)"
-    if ! choose_asset; then
-        exit $?
-    fi
+    choose_asset
     if ! stop_app; then
         exit 6
     fi
@@ -462,6 +489,10 @@ cmd_update() {
     fi
     exit "$update_code"
 }
+
+if [[ "${QBT_SKIP_MAIN:-0}" == "1" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 case "$COMMAND" in
     install)

@@ -271,7 +271,7 @@ function Start-Qbt {
     try {
         Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$Exe`"" | Out-Null
     } catch {
-        Write-Log 'WARN' "Shell launch failed, starting directly: $($_.Exception.Message)"
+        Write-Log 'WARN' "Could not launch via the shell, the client may start with elevated rights: $($_.Exception.Message)"
         Start-Process -FilePath $Exe -WorkingDirectory (Split-Path -Parent $Exe) | Out-Null
     }
 }
@@ -423,8 +423,14 @@ function Install-Task {
 
 function Hide-UpdatePopupOnly {
     $qbt = Get-QbtInstall
+    $stopped = $true
     if ($qbt -and $qbt.Running) {
-        $null = Stop-Qbt
+        $stopped = Stop-Qbt
+    }
+    if (-not $stopped) {
+        Write-Log 'ERROR' 'qBittorrent could not be closed; the update popup was left unchanged.'
+        $script:ExitCode = 6
+        return $false
     }
     $ok = Disable-UpdatePopup
     if ($ok) {
@@ -453,15 +459,21 @@ try {
     elseif ($Install) {
         Install-Task
         $qbt = Get-QbtInstall
+        $stopped = $true
         if ($qbt -and $qbt.Running) {
-            $null = Stop-Qbt
+            $stopped = Stop-Qbt
         }
-        if (Disable-UpdatePopup) {
-            Write-Log 'INFO' 'Setup complete. The client is updated automatically every time the PC starts.'
+        if ($stopped) {
+            if (Disable-UpdatePopup) {
+                Write-Log 'INFO' 'Setup complete. The client is updated automatically every time the PC starts.'
+            } else {
+                Write-Log 'WARN' 'Setup finished, but the update popup could not be disabled.'
+            }
+            if ($qbt -and $qbt.Running) { Start-Qbt -Exe $qbt.Exe }
         } else {
-            Write-Log 'WARN' 'Setup finished, but the update popup could not be disabled.'
+            Write-Log 'WARN' 'Setup finished, but qBittorrent could not be closed, so the update popup was left unchanged.'
+            $ExitCode = 6
         }
-        if ($qbt -and $qbt.Running) { Start-Qbt -Exe $qbt.Exe }
     }
     else {
         $ExitCode = Invoke-Update
