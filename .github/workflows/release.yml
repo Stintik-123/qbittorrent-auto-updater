@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build a release for (e.g. v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - name: Check the bash script
+        run: bash -n qbt-updater.sh
+
+      - name: Check the PowerShell script
+        shell: pwsh
+        run: |
+          $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD 'qbt-updater.ps1'), [ref]$null, [ref]$errors)
+          if ($errors -and $errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+          Write-Host 'OK: qbt-updater.ps1'
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=(qbt-updater.ps1 qbt-updater.sh install.cmd)
+          cat > release-notes.md <<'EOF'
+          Keeps qBittorrent updated automatically and removes the "A new version is available - do you want to update?" popup. Works on Windows, macOS and Linux.
+
+          **Windows** - `qbt-updater.ps1`:
+
+          ```powershell
+          powershell -ExecutionPolicy Bypass -File .\qbt-updater.ps1 -Install
+          powershell -ExecutionPolicy Bypass -File .\qbt-updater.ps1 -HidePopup
+          ```
+
+          **macOS / Linux** - `qbt-updater.sh`:
+
+          ```bash
+          bash qbt-updater.sh install
+          bash qbt-updater.sh hide-popup
+          ```
+
+          No dependencies: no winget, no modules, nothing to install. See the README for step-by-step instructions, removal guide and troubleshooting.
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            gh release create "$TAG" "${files[@]}" \
+              --verify-tag \
+              --title "qBittorrent Auto Updater $TAG" \
+              --notes-file release-notes.md
+          fi
