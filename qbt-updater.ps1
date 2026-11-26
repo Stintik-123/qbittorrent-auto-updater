@@ -3,23 +3,7 @@
 [CmdletBinding()]
 param(
     [switch] $Install,
-    [switch] $Uninstall,
-    [switch] $HidePopup,
-    [switch] $Update,
-    [switch] $Check,
-
-    [ValidateSet('stable', 'beta')]
-    [string] $Channel = 'stable',
-
-    [ValidateSet('auto', 'lt2', 'lt12')]
-    [string] $Variant = 'auto',
-
-    [ValidatePattern('^\d+$')]
-    [int] $LogonDelayMinutes = 0,
-
-    [string] $TaskName = 'qBittorrent Auto Updater',
-
-    [string] $LogPath = (Join-Path $env:LOCALAPPDATA 'qBittorrentUpdater\updater.log')
+    [switch] $HidePopup
 )
 
 Set-StrictMode -Version Latest
@@ -31,6 +15,8 @@ $ApiBase = "https://api.github.com/repos/$Owner/$Repo"
 $DownloadBase = "https://github.com/$Owner/$Repo/releases/download"
 $TempDir = Join-Path $env:TEMP ("qbt-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $InstallDir = Join-Path $env:ProgramData 'qBittorrentUpdater'
+$TaskName = 'qBittorrent Auto Updater'
+$LogPath = Join-Path $env:LOCALAPPDATA 'qBittorrentUpdater\updater.log'
 $StateFile = Join-Path (Split-Path -Parent $LogPath) 'installed.tag'
 $ExitCode = 0
 
@@ -62,20 +48,10 @@ function Test-Admin {
 }
 
 function Invoke-Elevated {
-    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
-    foreach ($pair in @(
-        @('-Channel', $Channel), @('-Variant', $Variant),
-        @('-LogonDelayMinutes', $LogonDelayMinutes),
-        @('-TaskName', "`"$TaskName`""), @('-LogPath', "`"$LogPath`"")
-    )) {
-        if ($pair[1]) { $argList += $pair[0]; $argList += $pair[1] }
-    }
-    foreach ($name in @('Install', 'Uninstall', 'HidePopup', 'Update', 'Check')) {
-        if ((Get-Variable -Name $name -ValueOnly)) { $argList += "-$name" }
-    }
-
     Write-Log 'INFO' 'Administrator rights required, asking via UAC...'
     try {
+        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+        if ($Install) { $argList += '-Install' }
         $p = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $argList -Verb RunAs -Wait -PassThru
         return $p.ExitCode
     } catch {
@@ -154,11 +130,10 @@ function Test-Lt12Build {
 
 function Get-LatestRelease {
     $headers = @{ 'User-Agent' = 'qbt-updater'; 'Accept' = 'application/vnd.github+json' }
-    $wantPre = ($Channel -eq 'beta')
 
     try {
         $rels = Invoke-RestMethod -Uri "$ApiBase/releases?per_page=30" -Headers $headers -UseBasicParsing -ErrorAction Stop
-        $rel = @($rels) | Where-Object { [bool]$_.prerelease -eq $wantPre } | Select-Object -First 1
+        $rel = @($rels) | Where-Object { -not [bool]$_.prerelease } | Select-Object -First 1
         if ($rel -and $rel.tag_name) {
             $ver = ($rel.tag_name -replace '^release-', '')
             $digests = @{}
@@ -167,16 +142,11 @@ function Get-LatestRelease {
                     $digests[$a.name] = $Matches[1].ToLowerInvariant()
                 }
             }
-            Write-Log 'DEBUG' "GitHub API: latest $ver ($Channel)"
+            Write-Log 'DEBUG' "GitHub API: latest $ver"
             return [pscustomobject]@{ Version = $ver; Tag = $rel.tag_name; Digests = $digests }
         }
     } catch {
         Write-Log 'WARN' "GitHub API unavailable ($($_.Exception.Message)), using the releases page"
-    }
-
-    if ($wantPre) {
-        Write-Log 'ERROR' 'The beta channel needs the GitHub API, which is unreachable right now.'
-        return $null
     }
 
     $loc = $null
@@ -245,8 +215,7 @@ function Test-NeedsUpdate {
     return ($Installed.Pre.Num -lt $Candidate.Pre.Num)
 }
 
-function Set-UpdateCheckKey {
-    param([string] $Value)
+function Disable-UpdatePopup {
     $ini = Join-Path $env:APPDATA 'qBittorrent\qBittorrent.ini'
     if (-not (Test-Path -LiteralPath $ini)) {
         Write-Log 'WARN' "qBittorrent.ini not found at $ini"
@@ -257,42 +226,21 @@ function Set-UpdateCheckKey {
     $esc = [regex]::Escape($key)
 
     if ($content -match "(?m)^$esc=.*$") {
-        if ($Value) {
-            $content = [regex]::Replace($content, "(?m)^$esc=.*$", "$key=$Value")
-        } else {
-            $content = [regex]::Replace($content, "(?m)^$esc=.*\r?\n?", '')
-        }
-    } elseif ($Value) {
-        if ($content -match '(?m)^\[Preferences\]\s*$') {
-            $content = [regex]::Replace($content, '(?m)^(\[Preferences\]\s*)$', "`$1`r`n$key=$Value")
-        } else {
-            $content = $content.TrimEnd() + "`r`n[Preferences]`r`n$key=$Value`r`n"
-        }
+        $content = [regex]::Replace($content, "(?m)^$esc=.*$", "$key=false")
+    } elseif ($content -match '(?m)^\[Preferences\]\s*$') {
+        $content = [regex]::Replace($content, '(?m)^(\[Preferences\]\s*)$', "`$1`r`n$key=false")
     } else {
-        return $true
+        $content = $content.TrimEnd() + "`r`n[Preferences]`r`n$key=false`r`n"
     }
 
     try {
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($ini, $content, $utf8NoBom)
+        Write-Log 'INFO' 'Update popup disabled (Advanced\updateCheck=false).'
         return $true
     } catch {
         Write-Log 'WARN' "Cannot write qBittorrent.ini: $($_.Exception.Message)"
         return $false
-    }
-}
-
-function Disable-UpdatePopup {
-    if (Set-UpdateCheckKey -Value 'false') {
-        Write-Log 'INFO' 'Update popup disabled (Advanced\updateCheck=false).'
-        return $true
-    }
-    return $false
-}
-
-function Restore-UpdatePopup {
-    if (Set-UpdateCheckKey -Value '') {
-        Write-Log 'INFO' 'Update popup restored (Advanced\updateCheck key removed, qBittorrent default applies).'
     }
 }
 
@@ -368,15 +316,7 @@ function Invoke-Update {
         Write-Log 'WARN' "Installed version unknown ($($qbt.Exe)), updating anyway."
     }
 
-    if ($Check) {
-        Write-Log 'INFO' "Update available: $($qbt.Version) -> $($rel.Version). Check only, nothing changed."
-        return 0
-    }
-
-    $variant = $Variant
-    if ($variant -eq 'auto') {
-        $variant = if (Test-Lt12Build -Dir $qbt.Dir) { 'lt12' } else { 'lt2' }
-    }
+    $variant = if (Test-Lt12Build -Dir $qbt.Dir) { 'lt12' } else { 'lt2' }
 
     $candidates = Get-InstallerCandidates -Version $rel.Version -Variant $variant
     $known = @($candidates | Where-Object { $rel.Digests.ContainsKey($_) })
@@ -456,7 +396,7 @@ function Install-Task {
     $target = Join-Path $InstallDir 'qbt-updater.ps1'
     Copy-Item -LiteralPath $PSCommandPath -Destination $target -Force
 
-    $psArgs = ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Update -Channel {1} -Variant {2} -LogPath "{3}"' -f $target, $Channel, $Variant, $LogPath)
+    $psArgs = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $target
     $launcher = Join-Path $InstallDir 'run-updater.vbs'
     $vbsArgs = $psArgs.Replace('"', '""')
     $vbs = "Set shell = CreateObject(`"WScript.Shell`")`r`nshell.Run `"powershell.exe $vbsArgs`", 0, False"
@@ -469,9 +409,6 @@ function Install-Task {
         -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 1)
 
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-    if ($LogonDelayMinutes -gt 0) {
-        try { $trigger.Delay = "PT${LogonDelayMinutes}M" } catch { }
-    }
 
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
@@ -481,22 +418,7 @@ function Install-Task {
         -Principal $principal -Settings $settings `
         -Description 'Automatically updates qBittorrent to the latest official release.' | Out-Null
 
-    $when = if ($LogonDelayMinutes -gt 0) { "${LogonDelayMinutes} minute(s) after sign-in" } else { 'immediately at sign-in' }
-    Write-Log 'INFO' "Scheduled task '$TaskName' created: runs $when on every PC start, fully hidden, from $target."
-}
-
-function Uninstall-Task {
-    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        Write-Log 'INFO' "Scheduled task '$TaskName' removed."
-    } else {
-        Write-Log 'INFO' "Scheduled task '$TaskName' not found."
-    }
-    foreach ($f in @((Join-Path $InstallDir 'run-updater.vbs'), (Join-Path $InstallDir 'qbt-updater.ps1'))) {
-        if ($f -ne $PSCommandPath -and (Test-Path -LiteralPath $f)) {
-            Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
-        }
-    }
+    Write-Log 'INFO' "Scheduled task '$TaskName' created: runs at every sign-in, fully hidden, from $target."
 }
 
 function Hide-UpdatePopupOnly {
@@ -517,8 +439,8 @@ function Hide-UpdatePopupOnly {
 try {
     Write-Log 'INFO' '=== qbt-updater ==='
 
-    $isDefault = -not ($Install -or $Uninstall -or $HidePopup -or $Update -or $Check)
-    $needsAdmin = ($Install -or $Uninstall -or $Update -or $isDefault) -and -not $Check
+    $isDefault = -not ($Install -or $HidePopup)
+    $needsAdmin = ($Install -or $isDefault)
     if ($needsAdmin -and -not (Test-Admin)) {
         $code = Invoke-Elevated
         if ($null -eq $code) { $ExitCode = 5 } else { $ExitCode = $code }
@@ -527,10 +449,6 @@ try {
 
     if ($HidePopup) {
         $null = Hide-UpdatePopupOnly
-    }
-    elseif ($Uninstall) {
-        Uninstall-Task
-        Restore-UpdatePopup
     }
     elseif ($Install) {
         Install-Task
