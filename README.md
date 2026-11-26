@@ -1,43 +1,52 @@
 # qBittorrent Auto Updater for Windows
 
-One small PowerShell script that keeps qBittorrent updated automatically - and stops the
-"A new version is available, do you want to update?" popup from ever appearing again.
+Tired of qBittorrent asking *"A new version is available — do you want to update?"* every other
+week, and of downloading installers by hand afterwards? This script does both jobs for you.
 
-* **One file.** No dependencies, no winget, no modules, nothing to install.
-* **Unattended.** Runs from Task Scheduler with the highest privileges, so no UAC popup.
-* **Official sources only.** The installer is downloaded from the official GitHub release and
-  its SHA-256 checksum is verified before it runs.
+It's a single PowerShell file. No winget, no modules, no installer of its own — if you have
+Windows and PowerShell, you already have everything it needs.
+
+**What it does:**
+
+* ✅ Checks the latest official release on the qBittorrent GitHub page (every sign-in).
+* ✅ Downloads the official installer, verifies its SHA-256 checksum, and installs it silently.
+* ✅ Restarts qBittorrent afterwards if it was running — torrents resume from where they were.
+* ✅ Switches off the built-in update popup, so the question never appears again.
+* ✅ Follows the **stable** or the **beta** channel — your choice.
+* ✅ Picks the right build automatically: libtorrent 2.x or 1.2.x, matching what you have installed.
 
 ---
 
-## Install (one command, once)
+## Quick start (one command, once)
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\qbt-updater.ps1 -Install
 ```
 
-That single command:
+You can also just double-click `install.cmd`.
 
-1. Registers a scheduled task that updates qBittorrent silently **the moment you sign in**,
-   so a fresh release is picked up every time you boot the machine.
-2. Writes `Advanced\updateCheck=false` into `qBittorrent.ini` so the client stops asking you
-   to update - this script takes over that job.
+Windows will show one UAC prompt (the scheduled task needs admin rights to update a
+machine-wide installation). Approve it, and that's the last time you'll think about
+updating qBittorrent. The command does two things:
 
-You will get one UAC prompt, because the scheduled task needs administrator rights to be able
-to update a machine-wide installation. After that, updates happen on their own.
+1. Registers a scheduled task that silently checks for updates **every time you sign in to
+   Windows**. Turn the PC on, and a fresh release — if any — is installed before you even
+   open the client.
+2. Writes `Advanced\updateCheck=false` into `qBittorrent.ini`, so qBittorrent itself stops
+   nagging about updates. The script takes over that job.
 
-Double-clicking `install.cmd` does the same thing.
+## Everyday commands
 
-## Other commands
+You'll rarely need these — everything below is optional.
 
 ```powershell
-# Update right now
+# Check for and install an update right now
 powershell -ExecutionPolicy Bypass -File .\qbt-updater.ps1 -Update
 
-# Just show the versions, change nothing
+# Just show the installed and the latest version, change nothing
 powershell -ExecutionPolicy Bypass -File .\qbt-updater.ps1 -Check
 
-# Remove the scheduled task
+# Remove the scheduled task (the updater stops working, qBittorrent is untouched)
 powershell -ExecutionPolicy Bypass -File .\qbt-updater.ps1 -Uninstall
 ```
 
@@ -49,35 +58,39 @@ powershell -ExecutionPolicy Bypass -File .\qbt-updater.ps1 -Uninstall
 | `-Uninstall` | switch | - | Remove the scheduled task. |
 | `-Update` | switch | - | Check for an update and install it (default action). |
 | `-Check` | switch | - | Report versions only, change nothing. |
-| `-Channel` | `stable`, `beta` | `stable` | Which releases to follow. `beta` includes pre-releases. |
-| `-Variant` | `auto`, `lt2`, `lt12` | `auto` | `auto` detects the installed libtorrent build from the bundled DLL. |
+| `-Channel` | `stable`, `beta` | `stable` | `beta` also follows pre-releases like `5.3.0beta1`. |
+| `-Variant` | `auto`, `lt2`, `lt12` | `auto` | Which libtorrent build to install. `auto` detects it from the installed DLL. |
 | `-LogonDelayMinutes` | minutes | `0` | Delay after sign-in. `0` means the check starts immediately. |
 | `-TaskName` | string | `qBittorrent Auto Updater` | Scheduled task name. |
 | `-LogPath` | path | `%LOCALAPPDATA%\qBittorrentUpdater\updater.log` | Log file location. |
 
-## When does it run?
-
-One mode only: **the moment you sign in to Windows**. Turn the PC on, log in, and the updater
-immediately checks for a new qBittorrent release and installs it if there is one. Nothing to
-remember, no fixed time of day.
-
-If you would rather let the system settle first, add a delay in minutes:
+For example, to follow beta releases and give the system five minutes to settle at sign-in:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\qbt-updater.ps1 -Install -LogonDelayMinutes 5
+powershell -ExecutionPolicy Bypass -File .\qbt-updater.ps1 -Install -Channel beta -LogonDelayMinutes 5
 ```
 
-## How the update is performed
+## How the update works
 
 1. The installed version is read from the registry and from `qbittorrent.exe`.
-2. The latest release is taken from the GitHub API, with a fallback to the `/releases/latest`
-   redirect so it still works when the API rate limit is hit.
-3. The matching official installer is chosen (libtorrent 2.x or 1.2.x, x64 or arm64).
-4. qBittorrent is closed, the installer is downloaded, its SHA-256 is verified against the
-   digest published with the release, and it is run silently (`/S`).
-5. The resulting version is verified and qBittorrent is restarted if it was running.
+2. The latest release is fetched from the GitHub API — or, if the API rate limit is hit,
+   from the `/releases/latest` redirect, so the check keeps working either way.
+3. The matching official installer is chosen: libtorrent 2.x or 1.2.x, 64-bit x64
+   (that's the only Windows architecture qBittorrent publishes).
+4. qBittorrent is closed gracefully (it gets 25 seconds, then a force-kill).
+5. The installer is downloaded, its SHA-256 is verified against the digest published with
+   the release, and it is run silently (`/S`).
+6. The resulting version is verified and qBittorrent is restarted if it was running.
 
-## Exit codes
+## If something goes wrong
+
+Everything the script does is written to the log:
+
+```
+%LOCALAPPDATA%\qBittorrentUpdater\updater.log
+```
+
+The script also reports its outcome through an exit code:
 
 | Code | Meaning |
 |---|---|
@@ -92,19 +105,19 @@ powershell -ExecutionPolicy Bypass -File .\qbt-updater.ps1 -Install -LogonDelayM
 
 ## Requirements
 
-* Windows 10 / 11 (also Windows 7 with PowerShell 5.1)
-* PowerShell 5.1 or newer - nothing else
+* Windows 10 / 11, 64-bit
+* PowerShell 5.1 or newer — nothing else
 * Internet access to `github.com`
-* Administrator rights, only once, for the setup
+* Administrator rights, once, during setup
 
 ## Notes
 
-* If qBittorrent is set to minimise to the tray when closed, the client may not exit on the
-  first request; the script then terminates it. Torrents resume from their saved state.
-* The script never stores credentials. It writes only to the temporary folder, the log file,
-  the qBittorrent installation folder and the single `Advanced\updateCheck` key in
+* If qBittorrent is set to minimise to the tray when closed, it may not exit on the first
+  request; the script then closes it forcefully. Torrents resume from their saved state.
+* The script never stores credentials. It writes only to its temp folder, the log file, the
+  qBittorrent installation folder and the single `Advanced\updateCheck` key in
   `qBittorrent.ini`.
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
