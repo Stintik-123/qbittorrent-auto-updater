@@ -1,27 +1,15 @@
 # qBittorrent Auto Updater for Windows
 
 Tired of qBittorrent asking *"A new version is available — do you want to update?"* every other
-week, and of downloading installers by hand afterwards? This script does both jobs for you —
-silently, in the background, with no windows ever appearing.
+week? This script gets rid of that question — and, if you want, keeps the client updated for
+you. Silently, in the background, with no windows ever appearing.
 
 It's a single PowerShell file. No winget, no modules, no installer of its own — if you have
 Windows and PowerShell, you already have everything it needs.
 
-**What it does:**
-
-* ✅ Checks the latest official release on the qBittorrent GitHub page every time you sign in.
-* ✅ Downloads the official installer, verifies its SHA-256 checksum against the digest
-  published with the release, and installs it silently.
-* ✅ Restarts qBittorrent afterwards if it was running — with normal user rights, never as
-  administrator, even if the update itself fails.
-* ✅ Switches off the built-in update popup, so the question never appears again.
-* ✅ Follows the **stable** or the **beta** channel — your choice.
-* ✅ Picks the right build automatically: libtorrent 2.x or 1.2.x, matching what you have installed.
-* ✅ Runs completely hidden — no console window flashes when you sign in.
-
 ---
 
-## Setup — one command, once
+## Command 1 — auto-update + no more popup
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\qbt-updater.ps1 -Install
@@ -36,19 +24,35 @@ qBittorrent. The command:
 2. Registers a hidden scheduled task that checks for updates **every time you sign in to
    Windows**. Nothing flashes, nothing opens — if there is a fresh release, it is installed
    before you even open the client.
-3. Writes `Advanced\updateCheck=false` into `qBittorrent.ini`, so qBittorrent itself stops
-   nagging about updates.
+3. Writes `Advanced\updateCheck=false` into `qBittorrent.ini`, so the *"do you want to
+   update?"* text never appears again.
 
-You can also just double-click `install.cmd` — it runs the same command.
+## Command 2 — just hide the popup (no auto-update)
 
-## Removal — one command
+```powershell
+powershell -ExecutionPolicy Bypass -File .\qbt-updater.ps1 -HidePopup
+```
+
+Only writes `Advanced\updateCheck=false` into `qBittorrent.ini` — no scheduled task, no
+updates, nothing else. Administrator rights are not needed for this one, because the file
+lives in your own user profile.
+
+If qBittorrent is running, it is closed for a moment and opened again — the client overwrites
+its settings file on exit, so the key cannot be written while it runs.
+
+Note: the setting file appears after the first launch of qBittorrent, so the client must have
+been run at least once.
+
+---
+
+## Removal
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\qbt-updater.ps1 -Uninstall
 ```
 
-This removes the scheduled task and its files and restores qBittorrent's own update check
-(the popup comes back). qBittorrent itself is not touched.
+Removes the scheduled task and its files and restores qBittorrent's own update check (the
+popup comes back). qBittorrent itself is not touched.
 
 ## Options (all optional)
 
@@ -100,6 +104,7 @@ The script also reports its outcome through an exit code:
 | `1` | Unexpected error |
 | `2` | qBittorrent is not installed |
 | `3` | Could not determine the latest version |
+| `4` | The update popup could not be disabled |
 | `5` | Administrator rights were required but not granted |
 | `6` | qBittorrent could not be stopped |
 | `7` | Download or installation failed |
@@ -110,7 +115,7 @@ The script also reports its outcome through an exit code:
 
 * Windows 10 / 11, 64-bit
 * PowerShell 5.1 or newer — nothing else
-* Internet access to `github.com`
+* Internet access to `github.com` (only for the auto-update command)
 * Administrator rights, once, during setup
 
 ## Notes

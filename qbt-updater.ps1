@@ -4,6 +4,7 @@
 param(
     [switch] $Install,
     [switch] $Uninstall,
+    [switch] $HidePopup,
     [switch] $Update,
     [switch] $Check,
 
@@ -69,7 +70,7 @@ function Invoke-Elevated {
     )) {
         if ($pair[1]) { $argList += $pair[0]; $argList += $pair[1] }
     }
-    foreach ($name in @('Install', 'Uninstall', 'Update', 'Check')) {
+    foreach ($name in @('Install', 'Uninstall', 'HidePopup', 'Update', 'Check')) {
         if ((Get-Variable -Name $name -ValueOnly)) { $argList += "-$name" }
     }
 
@@ -498,10 +499,25 @@ function Uninstall-Task {
     }
 }
 
+function Hide-UpdatePopupOnly {
+    $qbt = Get-QbtInstall
+    if ($qbt -and $qbt.Running) {
+        $null = Stop-Qbt
+    }
+    $ok = Disable-UpdatePopup
+    if ($ok) {
+        Write-Log 'INFO' 'Update popup disabled. Auto-update is not set up.'
+    } else {
+        $script:ExitCode = 4
+    }
+    if ($qbt -and $qbt.Running) { Start-Qbt -Exe $qbt.Exe }
+    return $ok
+}
+
 try {
     Write-Log 'INFO' '=== qbt-updater ==='
 
-    $isDefault = -not ($Install -or $Uninstall -or $Update -or $Check)
+    $isDefault = -not ($Install -or $Uninstall -or $HidePopup -or $Update -or $Check)
     $needsAdmin = ($Install -or $Uninstall -or $Update -or $isDefault) -and -not $Check
     if ($needsAdmin -and -not (Test-Admin)) {
         $code = Invoke-Elevated
@@ -509,7 +525,10 @@ try {
         throw 'elevated'
     }
 
-    if ($Uninstall) {
+    if ($HidePopup) {
+        $null = Hide-UpdatePopupOnly
+    }
+    elseif ($Uninstall) {
         Uninstall-Task
         Restore-UpdatePopup
     }
