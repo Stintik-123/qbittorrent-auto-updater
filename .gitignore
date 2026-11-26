@@ -1,0 +1,6 @@
+*.log
+*.zip
+*.exe
+.vs/
+.vscode/
+Thumbs.db
