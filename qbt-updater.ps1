@@ -91,21 +91,21 @@ function Test-Admin {
 
 function Invoke-Elevated {
     <# Re-runs this script elevated, returns the child's exit code or $null if declined. #>
-    $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
     foreach ($pair in @(
         @('-Channel', $Channel), @('-Variant', $Variant),
         @('-LogonDelayMinutes', $LogonDelayMinutes),
         @('-TaskName', "`"$TaskName`""), @('-LogPath', "`"$LogPath`"")
     )) {
-        if ($pair[1]) { $args += $pair[0]; $args += $pair[1] }
+        if ($pair[1]) { $argList += $pair[0]; $argList += $pair[1] }
     }
     foreach ($name in @('Install', 'Uninstall', 'Update', 'Check')) {
-        if ((Get-Variable -Name $name -ValueOnly)) { $args += "-$name" }
+        if ((Get-Variable -Name $name -ValueOnly)) { $argList += "-$name" }
     }
 
     Write-Log 'INFO' 'Administrator rights required, asking via UAC...'
     try {
-        $p = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $args -Verb RunAs -Wait -PassThru
+        $p = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $argList -Verb RunAs -Wait -PassThru
         return $p.ExitCode
     } catch {
         Write-Log 'WARN' "Elevation failed or was declined: $($_.Exception.Message)"
@@ -175,9 +175,12 @@ function Get-QbtInstall {
 }
 
 function Test-Lt12Build {
+    <# Both installer variants ship a libtorrent*.dll, so the file version, not the
+       file name, tells libtorrent 1.2.x apart from 2.x. #>
     param([string] $Dir)
     foreach ($d in @(Get-ChildItem -LiteralPath $Dir -Filter 'libtorrent*.dll' -ErrorAction SilentlyContinue)) {
         if ($d.Name -match '1[._]2') { return $true }
+        if ($d.VersionInfo.FileMajorPart -and $d.VersionInfo.FileMajorPart -lt 2) { return $true }
     }
     return $false
 }
@@ -186,53 +189,53 @@ function Test-Lt12Build {
 
 function Get-LatestRelease {
     <#
-        Version source 1: GitHub releases API (gives SHA-256 digests too).
-        Version source 2: the /releases/latest redirect (works without the API
-        and without any rate limit), asset URLs are built from the tag.
+        Version source 1: GitHub releases API (gives SHA-256 digests too and
+        supports both the stable and the beta channel).
+        Version source 2: the /releases/latest redirect (stable channel only,
+        works without the API and without any rate limit).
     #>
     $headers = @{ 'User-Agent' = 'qbt-updater'; 'Accept' = 'application/vnd.github+json' }
+    $wantPre = ($Channel -eq 'beta')
 
     # --- API ---
     try {
-        $rel = Invoke-RestMethod -Uri "$ApiBase/releases/latest" -Headers $headers -UseBasicParsing -ErrorAction Stop
+        $rels = Invoke-RestMethod -Uri "$ApiBase/releases?per_page=30" -Headers $headers -UseBasicParsing -ErrorAction Stop
+        $rel = @($rels) | Where-Object { [bool]$_.prerelease -eq $wantPre } | Select-Object -First 1
         if ($rel -and $rel.tag_name) {
-            $ver = ($rel.tag_name -replace '^release-', '') -replace '[^0-9.].*$', ''
+            $ver = ($rel.tag_name -replace '^release-', '')
             $digests = @{}
             foreach ($a in @($rel.assets)) {
-                if ($a.digest -and $a.digest -match '^sha256:(.+)$') { $digests[$a.name] = $Matches[1].ToLowerInvariant() }
+                if ($a.PSObject.Properties['digest'] -and $a.digest -match '^sha256:(.+)$') {
+                    $digests[$a.name] = $Matches[1].ToLowerInvariant()
+                }
             }
-            Write-Log 'DEBUG' "GitHub API: latest $ver"
+            Write-Log 'DEBUG' "GitHub API: latest $ver ($Channel)"
             return [pscustomobject]@{ Version = $ver; Tag = $rel.tag_name; Digests = $digests }
         }
     } catch {
         Write-Log 'WARN' "GitHub API unavailable ($($_.Exception.Message)), using the releases page"
     }
 
-    # --- redirect ---
-    $loc = $null
-    try {
-        $resp = Invoke-WebRequest -Uri "https://github.com/$Owner/$Repo/releases/latest" -UseBasicParsing -ErrorAction Stop
-        $loc = $resp.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
-    } catch {
-        $err = $_.Exception
-        while ($err -and -not $loc) {
-            $headers = $null
-            if ($err.Response -and $err.Response.Headers) { $headers = $err.Response.Headers }
-            if ($headers) {
-                $loc = $null
-                try { $loc = $headers.Location } catch { $loc = $null }
-                if (-not $loc) {
-                    try { $loc = $headers['Location'] } catch { $loc = $null }
-                }
-            }
-            $err = $err.InnerException
-        }
-        if (-not $loc) {
-            Write-Log 'ERROR' "Cannot reach GitHub: $($_.Exception.Message)"
-            return $null
-        }
+    if ($wantPre) {
+        Write-Log 'ERROR' 'The beta channel needs the GitHub API, which is unreachable right now.'
+        return $null
     }
 
+    # --- redirect (stable only) ---
+    $loc = $null
+    try {
+        $req = [System.Net.WebRequest]::Create("https://github.com/$Owner/$Repo/releases/latest")
+        $req.AllowAutoRedirect = $false
+        $req.UserAgent = 'qbt-updater'
+        $resp = $req.GetResponse()
+        $loc = $resp.Headers['Location']
+        $resp.Close()
+    } catch { }
+
+    if (-not $loc) {
+        Write-Log 'ERROR' 'Cannot reach GitHub to determine the latest version.'
+        return $null
+    }
     if ($loc -notmatch 'release-([0-9][0-9.]*)') {
         Write-Log 'ERROR' "Cannot parse the latest version from '$loc'"
         return $null
@@ -242,11 +245,13 @@ function Get-LatestRelease {
     return [pscustomobject]@{ Version = $ver; Tag = "release-$ver"; Digests = @{} }
 }
 
-function Get-InstallerUrl {
-    param([string] $Tag, [string] $Version, [string] $Variant, [string] $Arch)
-    $suffix = if ($Arch -eq 'arm64') { 'arm64' } else { 'x64' }
-    $lt = if ($Variant -eq 'lt12') { '_lt12' } else { '' }
-    return "$DownloadBase/$Tag/qbittorrent_${Version}${lt}_${suffix}_setup.exe"
+function Get-InstallerCandidates {
+    <# Only 64-bit x64 installers are published. Newer releases name the
+       libtorrent 2.x asset without a suffix (or _lt20), older ones only
+       have _lt12 for the 1.2.x build, so try the plausible names in order. #>
+    param([string] $Version, [string] $Variant)
+    $suffixes = if ($Variant -eq 'lt12') { @('_lt12') } else { @('_lt20', '') }
+    return @($suffixes | ForEach-Object { "qbittorrent_${Version}$($_)_x64_setup.exe" })
 }
 
 # --- update popup -----------------------------------------------------------
@@ -270,7 +275,8 @@ function Disable-UpdatePopup {
     }
 
     try {
-        Set-Content -LiteralPath $ini -Value $content -Encoding UTF8 -NoNewline
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($ini, $content, $utf8NoBom)
         Write-Log 'INFO' 'Update popup disabled (Advanced\updateCheck=false).'
         return $true
     } catch {
@@ -316,16 +322,27 @@ function Invoke-Update {
         Write-Log 'ERROR' 'qBittorrent is not installed on this machine.'
         return 2
     }
-    Write-Log 'INFO' "Installed: $($qbt.Version) ($($qbt.Exe))"
-
     $rel = Get-LatestRelease
     if (-not $rel) { return 3 }
     Write-Log 'INFO' "Latest:    $($rel.Version)"
 
-    $cur = [version]($qbt.Version -replace '[^0-9.].*$', '')
     $new = [version]($rel.Version -replace '[^0-9.].*$', '')
-    if ($cur -ge $new) {
-        Write-Log 'INFO' "Already up to date ($cur)."
+    $cur = $null
+    if ($qbt.Version) {
+        try { $cur = [version]$qbt.Version } catch { $cur = $null }
+    }
+    if ($cur) {
+        Write-Log 'INFO' "Installed: $cur ($($qbt.Exe))"
+        if ($cur -ge $new) {
+            Write-Log 'INFO' "Already up to date ($cur)."
+            return 0
+        }
+    } else {
+        Write-Log 'WARN' "Installed version unknown ($($qbt.Exe)), updating anyway."
+    }
+
+    if ($Check) {
+        Write-Log 'INFO' "Update available: $cur -> $new. Check only, nothing changed."
         return 0
     }
 
@@ -333,15 +350,16 @@ function Invoke-Update {
     if ($variant -eq 'auto') {
         $variant = if (Test-Lt12Build -Dir $qbt.Dir) { 'lt12' } else { 'lt2' }
     }
-    $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { 'arm64' } else { 'x64' }
-
-    $url = Get-InstallerUrl -Tag $rel.Tag -Version $rel.Version -Variant $variant -Arch $arch
-    Write-Log 'INFO' "Installer: $url"
-
-    if ($Check) {
-        Write-Log 'INFO' "Update available: $cur -> $new. Check only, nothing changed."
-        return 0
+    $candidates = Get-InstallerCandidates -Version $rel.Version -Variant $variant
+    if ($rel.Digests.Count -gt 0) {
+        $known = @($candidates | Where-Object { $rel.Digests.ContainsKey($_) })
+        if (-not $known) {
+            Write-Log 'ERROR' "Release $($rel.Version) has no x64 installer asset we can use."
+            return 3
+        }
+        $candidates = $known
     }
+    Write-Log 'INFO' "Installer: $($candidates[0])"
 
     if (-not (Stop-Qbt)) {
         Write-Log 'ERROR' 'Cannot stop qBittorrent, aborting.'
@@ -354,18 +372,25 @@ function Invoke-Update {
     $file = Join-Path $TempDir 'qbittorrent-setup.exe'
 
     Write-Log 'INFO' 'Downloading...'
-    try {
-        $old = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing -ErrorAction Stop
-        $ProgressPreference = $old
-    } catch {
-        Write-Log 'ERROR' "Download failed: $($_.Exception.Message)"
+    $assetName = $null
+    $old = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
+    foreach ($asset in $candidates) {
+        $url = "$DownloadBase/$($rel.Tag)/$asset"
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing -ErrorAction Stop
+            $assetName = $asset
+            break
+        } catch {
+            Write-Log 'WARN' "Download of $asset failed: $($_.Exception.Message)"
+        }
+    }
+    $ProgressPreference = $old
+    if (-not $assetName) {
+        Write-Log 'ERROR' 'All download attempts failed.'
         return 7
     }
 
     $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
-    $ltTag = if ($variant -eq 'lt12') { '_lt12' } else { '' }
-    $assetName = "qbittorrent_$($rel.Version)$ltTag`_$arch`_setup.exe"
     $expected = if ($rel.Digests.ContainsKey($assetName)) { $rel.Digests[$assetName] } else { $null }
     if ($expected) {
         if ($hash -ne $expected) {
@@ -388,7 +413,11 @@ function Invoke-Update {
 
     Start-Sleep -Seconds 3
     $after = Get-QbtInstall
-    if ($after -and $after.Version -eq $rel.Version) {
+    $afterOk = $false
+    if ($after -and $after.Version) {
+        try { $afterOk = ([version]$after.Version) -ge $new } catch { $afterOk = $false }
+    }
+    if ($afterOk) {
         Write-Log 'INFO' "Updated to $($after.Version)."
         if ($qbt.Running) { Start-Qbt -Exe $after.Exe }
         return 0
